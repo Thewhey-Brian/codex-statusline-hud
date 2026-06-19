@@ -403,6 +403,7 @@ run_once() {
     tmux) render_tmux ;;
     *)    render_panel ;;
   esac
+  return 0
 }
 
 case "$MODE" in
