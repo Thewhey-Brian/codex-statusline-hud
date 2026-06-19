@@ -28,6 +28,27 @@ on demand, in a watch pane, or wired into your shell prompt / tmux bar.
 
 If/when Codex ships custom status items, the same renderer can be dropped in.
 
+### Bonus: native footer HUD (Codex 0.141+)
+
+Newer Codex builds can't run an external script, but they *do* ship built-in
+status-line items — including **usage limits**. You can get a native footer HUD
+by adding this to `~/.codex/config.toml` (or run `/statusline` in the TUI):
+
+```toml
+tui.status_line = ["model-with-reasoning", "dir", "git-branch", "context-remaining", "five-hour-limit", "weekly-limit"]
+tui.status_line_use_colors = true
+```
+
+Available item ids include: `model-with-reasoning`, `reasoning`, `dir`,
+`git-branch`, `context-remaining`, `context-used`, `context-window-size`,
+`five-hour-limit`, `weekly-limit`, `used-tokens`, `total-input-tokens`,
+`total-output-tokens`, `pull-request-number`, `branch-changes`,
+`approval-mode`, `codex-version`. Validate with `codex doctor`.
+
+The standalone `codex-hud` is still useful for what the built-in items don't
+cover: **credit balance, spend caps, overage, edu/company detail**, and showing
+usage **outside** Codex (shell prompt, tmux, watch pane).
+
 ## How it works
 
 Reads the Codex OAuth token from `~/.codex/auth.json` and queries the (private)
