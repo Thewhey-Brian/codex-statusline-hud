@@ -1,8 +1,58 @@
 # codex-statusline-hud
 
-A comprehensive usage **HUD for the OpenAI Codex CLI** — rate-limit and credit
-tracking for both **individual** (Plus / Pro / Edu) and **company**
-(Team / Enterprise / Business) ChatGPT plans, rendered as colored bars.
+Usage HUD for the **OpenAI Codex CLI** — model, context, and rate-limit/credit
+info in your status line, for both **individual** (Plus / Pro / Edu) and
+**company** (Team / Enterprise / Business) ChatGPT plans.
+
+There are two ways to use it. **Start with the native footer** — it's built into
+Codex and needs no extra process. Use the standalone `codex-hud` only for the
+extras the native footer can't show (bars, credit balance, usage outside Codex).
+
+---
+
+## 1. Native footer (recommended) — Codex 0.141+
+
+Codex's own status line supports built-in items including **usage limits**.
+Configure it in `~/.codex/config.toml` (or run `/statusline` in the TUI):
+
+```toml
+tui.status_line = [
+  "model-with-reasoning",
+  "dir",
+  "git-branch",
+  "branch-changes",
+  "context-remaining",
+  "used-tokens",
+  "five-hour-limit",
+  "weekly-limit",
+  "approval-mode",
+]
+tui.status_line_use_colors = true
+```
+
+Renders in the Codex footer, e.g.:
+
+```
+gpt-5.5 medium · ~/proj · main · +12 ~1 · ctx 78% · 4.2k tok · 5h 98% · 7d 76% · on-request
+```
+
+Available item ids: `model-with-reasoning`, `reasoning`, `dir`, `git-branch`,
+`branch-changes`, `pull-request-number`, `context-remaining`, `context-used`,
+`context-window-size`, `used-tokens`, `total-input-tokens`,
+`total-output-tokens`, `five-hour-limit`, `weekly-limit`, `approval-mode`,
+`codex-version`, `fast-mode`, `task-progress`, `codex-version`.
+Validate edits with `codex doctor`.
+
+**Limitations of the native footer:** percentages only (no bars), no credit
+balance / spend-cap / overage detail, and it only shows inside Codex.
+
+---
+
+## 2. Standalone `codex-hud` (optional) — for bars & extras
+
+A separate command for what the native footer can't do: **bars**, **credit
+balance / spend caps / overage**, edu/company detail, and showing usage
+**outside** Codex (shell, tmux, watch pane).
 
 ```
 Codex | Plus
@@ -12,42 +62,16 @@ Codex | Plus
 
 ```
 Codex | Business (company)
-  Credits 328.50 left
+  Credits 328.50 left / 500.00 cap
   5h █░░░░░░░░░░░ 12% (resets 1h 0m)
 ```
 
-## Why standalone (and not a native status line)?
-
-Unlike Claude Code, **Codex has no command-backed/custom-script status line**.
-Its `/statusline` feature (merged Feb 2026) only lets you pick from a *fixed set
-of built-in items*; an external-command status item is still an open, unreleased
-feature request ([codex#20244](https://github.com/openai/codex/issues/20244),
-[codex#14043](https://github.com/openai/codex/issues/14043)). This holds for the
-latest Codex too. So this HUD is a standalone tool you run alongside Codex —
-on demand, in a watch pane, or wired into your shell prompt / tmux bar.
-
-If/when Codex ships custom status items, the same renderer can be dropped in.
-
-### Bonus: native footer HUD (Codex 0.141+)
-
-Newer Codex builds can't run an external script, but they *do* ship built-in
-status-line items — including **usage limits**. You can get a native footer HUD
-by adding this to `~/.codex/config.toml` (or run `/statusline` in the TUI):
-
-```toml
-tui.status_line = ["model-with-reasoning", "dir", "git-branch", "context-remaining", "five-hour-limit", "weekly-limit"]
-tui.status_line_use_colors = true
-```
-
-Available item ids include: `model-with-reasoning`, `reasoning`, `dir`,
-`git-branch`, `context-remaining`, `context-used`, `context-window-size`,
-`five-hour-limit`, `weekly-limit`, `used-tokens`, `total-input-tokens`,
-`total-output-tokens`, `pull-request-number`, `branch-changes`,
-`approval-mode`, `codex-version`. Validate with `codex doctor`.
-
-The standalone `codex-hud` is still useful for what the built-in items don't
-cover: **credit balance, spend caps, overage, edu/company detail**, and showing
-usage **outside** Codex (shell prompt, tmux, watch pane).
+> Why not run this *inside* Codex's footer? Codex has **no command-backed/
+> custom-script status item** in any released version (open request:
+> [codex#20244](https://github.com/openai/codex/issues/20244),
+> [codex#14043](https://github.com/openai/codex/issues/14043)). So it runs
+> alongside Codex, not in it. If Codex ever ships custom items, this renderer
+> drops straight in.
 
 ## How it works
 
