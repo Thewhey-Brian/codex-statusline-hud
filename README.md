@@ -16,13 +16,13 @@ Codex's own status line supports built-in items including **usage limits**.
 Configure it in `~/.codex/config.toml` (or run `/statusline` in the TUI):
 
 ```toml
+# The footer is a SINGLE line — items render left-to-right and the tail
+# truncates when wider than the terminal, so put the most important first.
+# `dir` is omitted on purpose (the shell prompt already shows it).
 tui.status_line = [
   "model-with-reasoning",
-  "dir",
   "git-branch",
-  "branch-changes",
   "context-remaining",
-  "used-tokens",
   "five-hour-limit",
   "weekly-limit",
   "approval-mode",
@@ -33,18 +33,20 @@ tui.status_line_use_colors = true
 Renders in the Codex footer, e.g.:
 
 ```
-gpt-5.5 medium · ~/proj · main · +12 ~1 · ctx 78% · 4.2k tok · 5h 98% · 7d 76% · on-request
+gpt-5.5 medium · main · ctx 78% · 5h 98% · 7d 76% · on-request
 ```
 
 Available item ids: `model-with-reasoning`, `reasoning`, `dir`, `git-branch`,
 `branch-changes`, `pull-request-number`, `context-remaining`, `context-used`,
 `context-window-size`, `used-tokens`, `total-input-tokens`,
 `total-output-tokens`, `five-hour-limit`, `weekly-limit`, `approval-mode`,
-`codex-version`, `fast-mode`, `task-progress`, `codex-version`.
+`codex-version`, `fast-mode`, `task-progress`.
 Validate edits with `codex doctor`.
 
-**Limitations of the native footer:** percentages only (no bars), no credit
-balance / spend-cap / overage detail, and it only shows inside Codex.
+**Limitations of the native footer:** single line only (no rows — the tail
+truncates when too wide), percentages only (no bars), no credit balance /
+spend-cap / overage detail, and it only shows inside Codex. For any of those,
+use the standalone `codex-hud` below.
 
 ---
 
