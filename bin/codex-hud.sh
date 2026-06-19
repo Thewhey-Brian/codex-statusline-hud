@@ -200,16 +200,22 @@ fetch_usage() {
 # Pull a rate-limit window's fields with defensive fallbacks across schema
 # variants. $1 = "primary" | "secondary". Echoes "PCT<TAB>RESET_SECONDS<TAB>WINDOW_LABEL".
 window_fields() {
-  local key="$1"
+  local key="$1"   # "primary" | "secondary"
   printf '%s' "$USAGE_JSON" | jq -r --arg k "$key" '
-    (.rate_limits[$k] // .[$k]) as $w
+    # live wham schema (.rate_limit.primary_window) first, then internal-event
+    # schema (.rate_limits.primary), then a flat top-level fallback.
+    ( .rate_limit[($k + "_window")]
+      // .rate_limits[$k]
+      // .[$k] ) as $w
     | if ($w == null or $w == {}) then empty else
     ($w.used_percent // $w.used_pct // 0) as $pct
-    | ($w.resets_in_seconds
+    | ($w.reset_after_seconds
+        // $w.resets_in_seconds
+        // $w.seconds_until_reset
         // (if ($w.reset_at // null) != null then ($w.reset_at - now) else null end)
-        // ($w.seconds_until_reset // 0)) as $reset
+        // 0) as $reset
     | ($w.window_minutes
-        // (if ($w.limit_window_seconds // null) != null then ($w.limit_window_seconds/60) else null end)
+        // (if ($w.limit_window_seconds // null) != null then ($w.limit_window_seconds / 60) else null end)
         // null) as $win
     | "\($pct|floor)\t\($reset|floor)\t\($win // "")"
     end
@@ -230,9 +236,27 @@ win_label() {
 # Render
 # --------------------------------------------------------------------------
 get_plan() {
-  local p; p=$(printf '%s' "$USAGE_JSON" | jq -r '.rate_limits.plan_type // .plan_type // .plan // empty' 2>/dev/null)
-  [ -z "$p" ] || [ "$p" = "unknown" ] && p="$JWT_PLAN"
+  local p; p=$(printf '%s' "$USAGE_JSON" | jq -r '.plan_type // .rate_limits.plan_type // .plan // empty' 2>/dev/null)
+  { [ -z "$p" ] || [ "$p" = "unknown" ]; } && p="$JWT_PLAN"
   printf '%s' "$p"
+}
+
+# read a field from the credits object (live or internal schema)
+credits_field() {
+  printf '%s' "$USAGE_JSON" | jq -r --arg f "$1" \
+    '(.credits // .rate_limits.credits // {})[$f] // empty' 2>/dev/null
+}
+# read spend_control.individual_limit (a $ cap), if present
+spend_limit() {
+  printf '%s' "$USAGE_JSON" | jq -r '.spend_control.individual_limit // empty' 2>/dev/null
+}
+
+# is this an edu / academic plan?
+is_edu_plan() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    edu*|education*|student*|academic*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # build "5h ████░░ 42% (resets 2h 5m)" for a window; empty if no data
@@ -253,20 +277,42 @@ render_window() {
   fi
 }
 
-# credits block for company / credit accounts
+# credits block. $1 = "show_empty" to print "enabled" when no detail is known
+# (used for company accounts); otherwise returns 1 when nothing meaningful.
 render_credits() {
-  local has unlimited bal
-  has=$(printf '%s' "$USAGE_JSON" | jq -r '.rate_limits.credits.has_credits // .credits.has_credits // false' 2>/dev/null)
+  local show_empty="${1:-}" has unlimited bal overage approx_l approx_c lim
+  has=$(credits_field has_credits)
   [ "$has" != "true" ] && return 1
-  unlimited=$(printf '%s' "$USAGE_JSON" | jq -r '.rate_limits.credits.unlimited // .credits.unlimited // false' 2>/dev/null)
-  bal=$(printf '%s' "$USAGE_JSON" | jq -r '.rate_limits.credits.balance // .credits.balance // empty' 2>/dev/null)
+  unlimited=$(credits_field unlimited)
+  bal=$(credits_field balance)
+  overage=$(credits_field overage_limit_reached)
+  approx_l=$(credits_field approx_local_messages)
+  approx_c=$(credits_field approx_cloud_messages)
+  lim=$(spend_limit)
+
   if [ "$unlimited" = "true" ]; then
-    printf '%sCredits%s %s%s∞ unlimited%s' "$DIM" "$RST" "$BOLD" "$GREEN" "$RST"
-  elif [ -n "$bal" ] && [ "$bal" != "null" ]; then
-    printf '%sCredits%s %s%s left%s' "$DIM" "$RST" "$BOLD" "$(printf '%s' "$bal" | awk '{printf "%.2f", $0}')" "$RST"
-  else
-    printf '%sCredits%s %senabled%s' "$DIM" "$RST" "$DIM" "$RST"
+    printf '%sCredits%s %s%s∞ unlimited%s' "$DIM" "$RST" "$BOLD" "$GREEN" "$RST"; return 0
   fi
+  if [ -n "$bal" ] && [ "$bal" != "null" ]; then
+    local extra=""
+    [ -n "$lim" ] && [ "$lim" != "null" ] && extra=" ${DIM}/ $(printf '%s' "$lim" | awk '{printf "%.2f",$0}') cap${RST}"
+    printf '%sCredits%s %s%s left%s%b' "$DIM" "$RST" "$BOLD" \
+      "$(printf '%s' "$bal" | awk '{printf "%.2f",$0}')" "$RST" "$extra"
+    [ "$overage" = "true" ] && printf ' %s%soverage reached%s' "$BOLD" "$RED" "$RST"
+    return 0
+  fi
+  if [ -n "$approx_l" ] && [ "$approx_l" != "null" ]; then
+    printf '%sCredits%s %s~%s local%s' "$DIM" "$RST" "$BOLD" "$approx_l" "$RST"
+    [ -n "$approx_c" ] && [ "$approx_c" != "null" ] && printf ' %s~%s cloud msgs%s' "$BOLD" "$approx_c" "$RST"
+    return 0
+  fi
+  if [ "$overage" = "true" ]; then
+    printf '%sCredits%s %s%soverage limit reached%s' "$DIM" "$RST" "$BOLD" "$RED" "$RST"; return 0
+  fi
+  if [ "$show_empty" = "show_empty" ]; then
+    printf '%sCredits%s %senabled%s' "$DIM" "$RST" "$DIM" "$RST"; return 0
+  fi
+  return 1
 }
 
 state_message() {
@@ -281,33 +327,42 @@ state_message() {
   esac
 }
 
+# classify account -> "company" | "edu" | "consumer"
+account_kind() {
+  local plan="$1" balance
+  if is_company_plan "$plan"; then printf 'company'; return; fi
+  if is_edu_plan "$plan"; then printf 'edu'; return; fi
+  # a credit balance on an otherwise-consumer plan implies a credit/org account
+  balance=$(credits_field balance)
+  [ -n "$balance" ] && [ "$balance" != "null" ] && { printf 'company'; return; }
+  printf 'consumer'
+}
+
 render_panel() {
-  local plan plabel header p5 p7 credits company=0
+  local plan plabel header p5 p7 credits kind tag=""
   plan=$(get_plan); plabel=$(plan_label "$plan")
-  is_company_plan "$plan" && company=1
-  # credits present + balance -> treat as credit account regardless of plan string
-  if [ "$(printf '%s' "$USAGE_JSON" | jq -r '.rate_limits.credits.has_credits // .credits.has_credits // false' 2>/dev/null)" = "true" ] \
-     && [ "$(printf '%s' "$USAGE_JSON" | jq -r '.rate_limits.credits.balance // .credits.balance // "null"' 2>/dev/null)" != "null" ]; then
-    company=1
-  fi
+  kind=$(account_kind "$plan")
 
   header="${BOLD}${CYAN}Codex${RST}"
   [ -n "$plabel" ] && header="${header} ${DIM}|${RST} ${BOLD}${plabel}${RST}"
-  [ "$company" = "1" ] && header="${header} ${DIM}(company)${RST}"
+  case "$kind" in company) tag="company";; edu) tag="edu";; esac
+  [ -n "$tag" ] && header="${header} ${DIM}(${tag})${RST}"
   printf '%b\n' "$header"
 
   p5=$(render_window primary "5h")
   p7=$(render_window secondary "7d")
-  credits=$(render_credits)
 
-  if [ "$company" = "1" ]; then
-    # company/credit account: lead with credits, then any rate windows
+  if [ "$kind" = "company" ]; then
+    # company / credit account: lead with credits (show even if only "enabled")
+    credits=$(render_credits show_empty)
     [ -n "$credits" ] && printf '  %b\n' "$credits"
     [ -n "$p5" ] && printf '  %b\n' "$p5"
     [ -n "$p7" ] && printf '  %b\n' "$p7"
     [ -z "$credits$p5$p7" ] && printf '  %b\n' "${DIM}no usage data yet${RST}"
   else
-    # individual account: rate-limit windows
+    # consumer / edu: rate-limit windows first, then credits if meaningful.
+    # edu plans get the same treatment but surface overage/credit detail too.
+    credits=$(render_credits)
     [ -n "$p5" ] && printf '  %b\n' "$p5"
     [ -n "$p7" ] && printf '  %b\n' "$p7"
     [ -n "$credits" ] && printf '  %b\n' "$credits"
@@ -322,13 +377,13 @@ render_line() {
   local head="Codex"; [ -n "$plabel" ] && head="Codex ${plabel}"
   parts="${BOLD}${CYAN}${head}${RST}"
 
-  local has bal
-  has=$(printf '%s' "$USAGE_JSON" | jq -r '.rate_limits.credits.has_credits // .credits.has_credits // false' 2>/dev/null)
-  bal=$(printf '%s' "$USAGE_JSON" | jq -r '.rate_limits.credits.balance // .credits.balance // empty' 2>/dev/null)
-  if { is_company_plan "$plan" || { [ "$has" = "true" ] && [ -n "$bal" ] && [ "$bal" != "null" ]; }; }; then
-    if [ -n "$bal" ] && [ "$bal" != "null" ]; then
-      parts="${parts} ${DIM}·${RST} ${BOLD}$(printf '%s' "$bal" | awk '{printf "%.2f",$0}') cr${RST}"
-    fi
+  local bal unlimited
+  bal=$(credits_field balance)
+  unlimited=$(credits_field unlimited)
+  if [ "$unlimited" = "true" ]; then
+    parts="${parts} ${DIM}·${RST} ${BOLD}${GREEN}∞ cr${RST}"
+  elif [ -n "$bal" ] && [ "$bal" != "null" ]; then
+    parts="${parts} ${DIM}·${RST} ${BOLD}$(printf '%s' "$bal" | awk '{printf "%.2f",$0}') cr${RST}"
   fi
   l5=$(window_fields primary); l7=$(window_fields secondary)
   if [ -n "$l5" ]; then

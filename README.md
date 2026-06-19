@@ -79,13 +79,19 @@ set -g status-interval 60
 
 ## Account types
 
-| Plan | What's shown |
-|---|---|
-| Plus / Pro / Edu (individual) | 5h + weekly rate-limit bars with reset times |
-| Team / Enterprise / Business (company) | Credit balance (or ∞ unlimited) first, then any rate-limit bars |
+| Account kind | Plans | What's shown |
+|---|---|---|
+| Consumer | Free / Plus / Pro | 5h + weekly rate-limit bars with reset times |
+| Edu | Education / Student / Academic | Rate-limit bars **plus** credit/overage detail (approx local & cloud messages, overage warnings) |
+| Company | Team / Enterprise / Business | Credit balance (or ∞ unlimited) and spend cap first, then rate-limit bars |
 
-Plan and account type are **auto-detected** from the usage response
-(`plan_type`, `credits`) with a fallback to the `id_token` plan claim.
+Account kind is **auto-detected** from the usage response (`plan_type`,
+`credits`, `spend_control`) with a fallback to the `id_token` plan claim. A
+credit balance on an otherwise-consumer plan is treated as a credit/org account.
+
+The HUD parses the live `wham/usage` schema (`rate_limit.primary_window` /
+`secondary_window`, top-level `plan_type`, `credits`, `spend_control`) and also
+falls back to Codex's internal-event schema, so it keeps working across versions.
 
 ## Config (env)
 
