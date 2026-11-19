@@ -36,15 +36,35 @@ Renders in the Codex footer, e.g.:
 gpt-5.5 medium · main · ctx 78% · 5h 98% · 7d 76% · on-request
 ```
 
-Available item ids: `model-with-reasoning`, `reasoning`, `dir`, `git-branch`,
-`branch-changes`, `pull-request-number`, `context-remaining`, `context-used`,
+Item ids include `model-with-reasoning`, `git-branch`, `branch-changes`,
+`pull-request-number`, `context-remaining`, `context-used`,
 `context-window-size`, `used-tokens`, `total-input-tokens`,
 `total-output-tokens`, `five-hour-limit`, `weekly-limit`, `approval-mode`,
-`codex-version`, `fast-mode`, `task-progress`.
-Validate edits with `codex doctor`.
+`codex-version`, `fast-mode` and `task-progress`. Codex 0.165 adds
+**`thread-credits`** and **`estimated-thread-cost`** (credits and cost of the
+current thread). The set changes between releases, so run `/statusline` in the
+TUI to pick from the exact list your version supports. `codex doctor` does
+**not** check `tui.status_line` items; unknown ids are just not shown.
+
+### Usage in the terminal title (0.165+)
+
+The terminal tab/window title takes the same kind of items, which gives you a
+second place for usage without crowding the footer:
+
+```toml
+tui.terminal_title = ["five-hour-limit", "weekly-limit", "thread-credits"]
+```
+
+Title items: `current-dir`, `run-state`, `thread-title`, `git-branch`,
+`context-remaining`, `context-used`, `five-hour-limit`, `weekly-limit`,
+`thread-credits`, `estimated-thread-cost`, `codex-version`, `used-tokens`,
+`total-input-tokens`, `total-output-tokens`, `thread-id`, `fast-mode`,
+`model-with-reasoning`, `task-progress`. `codex doctor` does validate this list
+(`title` check).
 
 **Limitations of the native footer:** single line only (no rows — the tail
-truncates when too wide), percentages only (no bars), no credit balance /
+truncates when too wide), percentages only (no bars), only the main 5h/weekly
+windows (no per-model or code-review limits), no account credit balance /
 spend-cap / overage detail, and it only shows inside Codex. For any of those,
 use the standalone `codex-hud` below.
 
@@ -52,9 +72,10 @@ use the standalone `codex-hud` below.
 
 ## 2. Standalone `codex-hud` (optional) — for bars & extras
 
-A separate command for what the native footer can't do: **bars**, **credit
-balance / spend caps / overage**, edu/company detail, and showing usage
-**outside** Codex (shell, tmux, watch pane).
+A separate command for what the native footer can't do: **bars**,
+**per-model and code-review limits**, **credit balance / spend caps /
+overage**, models that are temporarily unavailable, edu/company detail, and
+showing usage **outside** Codex (shell, tmux, watch pane).
 
 ```
 Codex | Plus
@@ -67,6 +88,27 @@ Codex | Business (company)
   Credits 328.50 left / 500.00 cap
   5h █░░░░░░░░░░░ 12% (resets 1h 0m)
 ```
+
+Per-model limits, the code-review limit, unavailable models and a
+limit-reached flag appear when the usage endpoint reports them:
+
+```
+Codex | Pro limit reached
+  5h ████████████ 100% (resets 50m)
+  7d ███████░░░░░ 64% (resets 3d 11h)
+  GPT-6 Astra
+    5h ████░░░░░░░░ 35% (resets 2h 30m)
+    7d █████████░░░ 81% (resets 4d 15h)
+  Code review
+    7d █░░░░░░░░░░░ 12% (resets 2d 7h)
+  gpt-6-sol unavailable — back in 2h 1m
+  1 limit reset credit available
+```
+
+`--line` / `--tmux` add each per-model limit's fuller window, e.g.
+`Codex Pro · 5h 100% · 7d 64% · GPT-6 Astra 7d 81% · limit reached`.
+Window labels come from the reported window length, so a plan with a single
+weekly window shows `7d`, not `5h`.
 
 > Why not run this *inside* Codex's footer? Codex has **no command-backed/
 > custom-script status item** in any released version (open request:
@@ -128,7 +170,7 @@ set -g status-interval 60
 
 | Account kind | Plans | What's shown |
 |---|---|---|
-| Consumer | Free / Plus / Pro | 5h + weekly rate-limit bars with reset times |
+| Consumer | Free / Plus / Pro Lite / Pro | 5h + weekly rate-limit bars with reset times (some plans have only a weekly window) |
 | Edu | Education / Student / Academic | Rate-limit bars **plus** credit/overage detail (approx local & cloud messages, overage warnings) |
 | Company | Team / Enterprise / Business | Credit balance (or ∞ unlimited) and spend cap first, then rate-limit bars |
 
@@ -137,8 +179,13 @@ Account kind is **auto-detected** from the usage response (`plan_type`,
 credit balance on an otherwise-consumer plan is treated as a credit/org account.
 
 The HUD parses the live `wham/usage` schema (`rate_limit.primary_window` /
-`secondary_window`, top-level `plan_type`, `credits`, `spend_control`) and also
-falls back to Codex's internal-event schema, so it keeps working across versions.
+`secondary_window`, top-level `plan_type`, `credits`, `spend_control`,
+`additional_rate_limits[]` (per-model limits: `limit_name` + `rate_limit`),
+`code_review_rate_limit`, `model_usage`, `rate_limit_reached_type`,
+`rate_limit_reset_credits`) and also falls back to Codex's internal-event
+schema, so it keeps working across versions. Consumer plans report
+`credits.balance: "0"` with `has_credits: false`; that is not treated as a
+credit account.
 
 ## Config (env)
 
