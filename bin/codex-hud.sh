@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # codex-hud — a comprehensive usage HUD for the OpenAI Codex CLI.
 #
-# Codex (as of CLI 0.138) has no command-backed TUI status line, so this is a
-# standalone HUD. It reads the Codex OAuth token from ~/.codex/auth.json and
+# Codex (as of CLI 0.165) has no command-backed TUI status line item, so this
+# is a standalone HUD. It reads the Codex OAuth token from ~/.codex/auth.json and
 # queries the (private) ChatGPT usage endpoint, then renders rate-limit /
 # credit info for both individual and company (team/enterprise/business)
 # ChatGPT plans.
@@ -104,6 +104,7 @@ plan_label() {
   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
     free*)        printf 'Free' ;;
     plus*)        printf 'Plus' ;;
+    prolite|pro_lite|pro-lite) printf 'Pro Lite' ;;
     pro*)         printf 'Pro' ;;
     team*)        printf 'Team' ;;
     edu*)         printf 'Edu' ;;
@@ -199,14 +200,18 @@ fetch_usage() {
 
 # Pull a rate-limit window's fields with defensive fallbacks across schema
 # variants. $1 = "primary" | "secondary". Echoes "PCT<TAB>RESET_SECONDS<TAB>WINDOW_LABEL".
+# Optional $2 = JSON of a rate_limit object to read instead of the top level
+# (used for additional per-model limits and the code-review limit).
 window_fields() {
-  local key="$1"   # "primary" | "secondary"
-  printf '%s' "$USAGE_JSON" | jq -r --arg k "$key" '
+  local key="$1" src="${2:-$USAGE_JSON}"   # key: "primary" | "secondary"
+  printf '%s' "$src" | jq -r --arg k "$key" '
     # live wham schema (.rate_limit.primary_window) first, then internal-event
-    # schema (.rate_limits.primary), then a flat top-level fallback.
-    ( .rate_limit[($k + "_window")]
-      // .rate_limits[$k]
-      // .[$k] ) as $w
+    # schema (.rate_limits.primary), then a bare rate_limit object, then a flat
+    # top-level fallback.
+    ( .rate_limit[($k + "_window")]?
+      // .rate_limits[$k]?
+      // .[($k + "_window")]?
+      // .[$k]? ) as $w
     | if ($w == null or $w == {}) then empty else
     ($w.used_percent // $w.used_pct // 0) as $pct
     | ($w.reset_after_seconds
@@ -261,8 +266,8 @@ is_edu_plan() {
 
 # build "5h ████░░ 42% (resets 2h 5m)" for a window; empty if no data
 render_window() {
-  local key="$1" deflabel="$2" line pct reset winmin lbl clr bar
-  line=$(window_fields "$key"); [ -z "$line" ] && return 1
+  local key="$1" deflabel="$2" src="${3:-$USAGE_JSON}" line pct reset winmin lbl clr bar
+  line=$(window_fields "$key" "$src"); [ -z "$line" ] && return 1
   pct=$(printf '%s' "$line" | cut -f1); reset=$(printf '%s' "$line" | cut -f2)
   winmin=$(printf '%s' "$line" | cut -f3)
   [ -z "$pct" ] && return 1
@@ -332,10 +337,84 @@ account_kind() {
   local plan="$1" balance
   if is_company_plan "$plan"; then printf 'company'; return; fi
   if is_edu_plan "$plan"; then printf 'edu'; return; fi
-  # a credit balance on an otherwise-consumer plan implies a credit/org account
+  # a credit balance on an otherwise-consumer plan implies a credit/org account.
+  # Consumer plans also return credits {has_credits:false, balance:"0"}; ignore that.
   balance=$(credits_field balance)
-  [ -n "$balance" ] && [ "$balance" != "null" ] && { printf 'company'; return; }
+  if [ "$(credits_field has_credits)" = "true" ] && [ -n "$balance" ] && [ "$balance" != "null" ]; then
+    printf 'company'; return
+  fi
   printf 'consumer'
+}
+
+# Per-model / per-feature limits from .additional_rate_limits[] and the
+# code-review limit. Echoes one "NAME<TAB>RATE_LIMIT_JSON" line per entry.
+extra_limits() {
+  printf '%s' "$USAGE_JSON" | jq -r '
+    ( [ (.additional_rate_limits // [])[]? | select(type == "object")
+        | { n: (.limit_name // .metered_feature // "limit"), r: (.rate_limit // .) } ]
+      + (if (.code_review_rate_limit | type) == "object"
+         then [ { n: "Code review", r: .code_review_rate_limit } ] else [] end) )
+    | .[] | select(.r | type == "object")
+    | "\(.n)\t\(.r | tojson)"' 2>/dev/null
+}
+
+# "gpt-x (until 3h 5m)" for models the account cannot use right now.
+unavailable_models() {
+  printf '%s' "$USAGE_JSON" | jq -r '
+    (.model_usage // {}) | to_entries[]
+    | select((.value | type) == "object" and .value.available == false)
+    | "\(.key)\t\((.value.available_at // "") | tostring)"' 2>/dev/null
+}
+
+# seconds until an epoch-seconds or ISO-8601 timestamp ("" if unknown)
+secs_until() {
+  jq -rn --arg t "${1:-}" '
+    ($t | tonumber? // (sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601?) // null)
+    | if . == null then "" else (. - now | floor) end' 2>/dev/null
+}
+
+limit_reached() {
+  printf '%s' "$USAGE_JSON" | jq -r '
+    if (.rate_limit.limit_reached == true) or (.rate_limit.allowed == false)
+       or ((.rate_limit_reached_type // null) != null)
+    then ((.rate_limit_reached_type | if type == "object" then (.type // .kind // "") elif type == "string" then . else "" end) // "")
+         | if . == "" or . == "rate_limit_reached" or . == "rate_limit" then "limit reached"
+           else gsub("_"; " ") end
+    else empty end' 2>/dev/null
+}
+
+# rate-limit reset credits the user can apply right now
+reset_credits() {
+  printf '%s' "$USAGE_JSON" | jq -r '.rate_limit_reset_credits.applicable_available_count // 0' 2>/dev/null
+}
+
+# Panel lines for extras (per-model limits, unavailable models, reset credits).
+render_extras() {
+  local name rl l1 l2 avail_at s
+  while IFS="$(printf '\t')" read -r name rl; do
+    [ -z "$name" ] && continue
+    l1=$(render_window primary "5h" "$rl"); l2=$(render_window secondary "7d" "$rl")
+    [ -z "$l1$l2" ] && continue
+    printf '  %s%s%s\n' "$BOLD" "$name" "$RST"
+    [ -n "$l1" ] && printf '    %b\n' "$l1"
+    [ -n "$l2" ] && printf '    %b\n' "$l2"
+  done <<EOS
+$(extra_limits)
+EOS
+  while IFS="$(printf '\t')" read -r name avail_at; do
+    [ -z "$name" ] && continue
+    s=$(secs_until "$avail_at")
+    if [ -n "$s" ] && [ "$s" -gt 0 ] 2>/dev/null; then
+      printf '  %s%s%s %sunavailable — back in %s%s\n' "$BOLD" "$name" "$RST" "$YELLOW" "$(fmt_dur "$s")" "$RST"
+    else
+      printf '  %s%s%s %sunavailable%s\n' "$BOLD" "$name" "$RST" "$YELLOW" "$RST"
+    fi
+  done <<EOS
+$(unavailable_models)
+EOS
+  s=$(reset_credits)
+  [ "${s:-0}" -gt 0 ] 2>/dev/null && printf '  %s%s limit reset credit%s available%s\n' "$DIM" "$s" "$([ "$s" -gt 1 ] && echo s)" "$RST"
+  return 0
 }
 
 render_panel() {
@@ -347,6 +426,8 @@ render_panel() {
   [ -n "$plabel" ] && header="${header} ${DIM}|${RST} ${BOLD}${plabel}${RST}"
   case "$kind" in company) tag="company";; edu) tag="edu";; esac
   [ -n "$tag" ] && header="${header} ${DIM}(${tag})${RST}"
+  local reached; reached=$(limit_reached)
+  [ -n "$reached" ] && header="${header} ${BOLD}${RED}${reached}${RST}"
   printf '%b\n' "$header"
 
   p5=$(render_window primary "5h")
@@ -368,6 +449,22 @@ render_panel() {
     [ -n "$credits" ] && printf '  %b\n' "$credits"
     [ -z "$p5$p7$credits" ] && printf '  %b\n' "${DIM}no usage data yet — run a Codex turn${RST}"
   fi
+  render_extras
+}
+
+# label for a window_fields line, falling back to $2
+line_label() {
+  local l; l=$(win_label "$(printf '%s' "$1" | cut -f3)")
+  printf '%s' "${l:-$2}"
+}
+# the fuller of a rate_limit's windows (window_fields line), for one-liners
+max_window() {
+  local a b pa pb
+  a=$(window_fields primary "$1"); b=$(window_fields secondary "$1")
+  [ -z "$a" ] && { printf '%s' "$b"; return; }
+  [ -z "$b" ] && { printf '%s' "$a"; return; }
+  pa=$(printf '%s' "$a" | cut -f1); pb=$(printf '%s' "$b" | cut -f1)
+  if [ "$pb" -gt "$pa" ] 2>/dev/null; then printf '%s' "$b"; else printf '%s' "$a"; fi
 }
 
 render_line() {
@@ -382,18 +479,27 @@ render_line() {
   unlimited=$(credits_field unlimited)
   if [ "$unlimited" = "true" ]; then
     parts="${parts} ${DIM}·${RST} ${BOLD}${GREEN}∞ cr${RST}"
-  elif [ -n "$bal" ] && [ "$bal" != "null" ]; then
+  elif [ "$(credits_field has_credits)" = "true" ] && [ -n "$bal" ] && [ "$bal" != "null" ]; then
     parts="${parts} ${DIM}·${RST} ${BOLD}$(printf '%s' "$bal" | awk '{printf "%.2f",$0}') cr${RST}"
   fi
-  l5=$(window_fields primary); l7=$(window_fields secondary)
-  if [ -n "$l5" ]; then
-    pct=$(printf '%s' "$l5" | cut -f1)
-    parts="${parts} ${DIM}·${RST} 5h $(bar_color "$pct")${BOLD}${pct}%${RST}"
-  fi
-  if [ -n "$l7" ]; then
-    pct=$(printf '%s' "$l7" | cut -f1)
-    parts="${parts} ${DIM}·${RST} 7d $(bar_color "$pct")${BOLD}${pct}%${RST}"
-  fi
+  local key def lw name rl reached
+  for key in primary secondary; do
+    lw=$(window_fields "$key"); [ -z "$lw" ] && continue
+    def=5h; [ "$key" = secondary ] && def=7d
+    pct=$(printf '%s' "$lw" | cut -f1)
+    parts="${parts} ${DIM}·${RST} $(line_label "$lw" "$def") $(bar_color "$pct")${BOLD}${pct}%${RST}"
+  done
+  # per-model limits: highest window only, e.g. "gpt-x 7d 80%"
+  while IFS="$(printf '\t')" read -r name rl; do
+    [ -z "$name" ] && continue
+    lw=$(max_window "$rl"); [ -z "$lw" ] && continue
+    pct=$(printf '%s' "$lw" | cut -f1)
+    parts="${parts} ${DIM}·${RST} ${name} $(line_label "$lw" "") $(bar_color "$pct")${BOLD}${pct}%${RST}"
+  done <<EOS
+$(extra_limits)
+EOS
+  reached=$(limit_reached)
+  [ -n "$reached" ] && parts="${parts} ${DIM}·${RST} ${BOLD}${RED}${reached}${RST}"
   printf '%b\n' "$parts"
 }
 
@@ -402,9 +508,23 @@ render_tmux() {
   local plan plabel pct l5 l7 out
   plan=$(get_plan); plabel=$(plan_label "$plan")
   out="#[fg=cyan,bold]Codex${plabel:+ $plabel}#[default]"
-  l5=$(window_fields primary); l7=$(window_fields secondary)
-  if [ -n "$l5" ]; then pct=$(printf '%s' "$l5" | cut -f1); out="$out #[fg=$(tmux_color "$pct")]5h ${pct}%#[default]"; fi
-  if [ -n "$l7" ]; then pct=$(printf '%s' "$l7" | cut -f1); out="$out #[fg=$(tmux_color "$pct")]7d ${pct}%#[default]"; fi
+  local key def lw name rl reached
+  for key in primary secondary; do
+    lw=$(window_fields "$key"); [ -z "$lw" ] && continue
+    def=5h; [ "$key" = secondary ] && def=7d
+    pct=$(printf '%s' "$lw" | cut -f1)
+    out="$out #[fg=$(tmux_color "$pct")]$(line_label "$lw" "$def") ${pct}%#[default]"
+  done
+  while IFS="$(printf '\t')" read -r name rl; do
+    [ -z "$name" ] && continue
+    lw=$(max_window "$rl"); [ -z "$lw" ] && continue
+    pct=$(printf '%s' "$lw" | cut -f1)
+    out="$out #[fg=$(tmux_color "$pct")]${name} $(line_label "$lw" "") ${pct}%#[default]"
+  done <<EOS
+$(extra_limits)
+EOS
+  reached=$(limit_reached)
+  [ -n "$reached" ] && out="$out #[fg=red,bold]${reached}#[default]"
   printf '%s\n' "$out"
 }
 tmux_color() {
